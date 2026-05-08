@@ -89,6 +89,11 @@ struct FSDState {
     // killer falls back to EPAS-level-only gating (conservative echo).
     bool           das_seen;
     uint8_t        das_hands_on_state;
+#if defined(BOARD_TTGO_DISPLAY)
+    bool           display_enabled;  // Toggle for T-Display LCD/backlight
+    uint8_t        display_brightness; // 0-100%
+    uint32_t       display_timeout_s;  // Timeout in seconds
+#endif
 };
 
 // ── API ───────────────────────────────────────────────────────────────────────

@@ -101,30 +101,47 @@ CanDriver *can_driver_create() {
 #include <mcp2515.h>   // autowp/autowp-mcp2515
 
 class Mcp2515Driver : public CanDriver {
+#if defined(BOARD_TTGO_DISPLAY)
+    SPIClass spi_;
+#endif
     MCP2515  mcp_;
     bool     listen_only_  = false;
+    bool     installed_    = false;
     uint32_t err_count_    = 0;
 
 public:
+#if defined(BOARD_TTGO_DISPLAY)
+    Mcp2515Driver() : spi_(HSPI), mcp_(PIN_MCP_CS, 10000000, &spi_) {}
+#else
     Mcp2515Driver() : mcp_(PIN_MCP_CS) {}
+#endif
 
     bool begin(bool listen_only) override {
+#if defined(BOARD_TTGO_DISPLAY)
+        // Keep MCP2515 on HSPI so TFT_eSPI can own the T-Display LCD SPI bus.
+        spi_.begin(PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI, PIN_MCP_CS);
+        spi_.setFrequency(8000000);
+#else
         SPI.begin(PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI, PIN_MCP_CS);
         SPI.setFrequency(8000000);
+#endif
 
         mcp_.reset();
-        if (mcp_.setBitrate(CAN_500KBPS, MCP_CRYSTAL_MHZ) != MCP2515::ERROR_OK)
+        if (mcp_.setBitrate(CAN_500KBPS, MCP_CRYSTAL_MHZ) != MCP2515::ERROR_OK) {
+            installed_ = false;
             return false;
+        }
 
         MCP2515::ERROR err = listen_only
             ? mcp_.setListenOnlyMode()
             : mcp_.setNormalMode();
         listen_only_ = listen_only;
-        return err == MCP2515::ERROR_OK;
+        installed_ = (err == MCP2515::ERROR_OK);
+        return installed_;
     }
 
     bool send(const CanFrame &frame) override {
-        if (listen_only_) return false;
+        if (!installed_ || listen_only_) return false;
         struct can_frame f;
         f.can_id  = frame.id;
         f.can_dlc = frame.dlc;
@@ -137,6 +154,7 @@ public:
     }
 
     bool receive(CanFrame &frame) override {
+        if (!installed_) return false;
         struct can_frame f;
         if (mcp_.readMessage(&f) != MCP2515::ERROR_OK) return false;
         frame.id  = f.can_id;
@@ -150,7 +168,7 @@ public:
     }
 
     void setListenOnly(bool enable) override {
-        if (listen_only_ == enable) return;
+        if (!installed_ || listen_only_ == enable) return;
         listen_only_ = enable;
         if (enable)
             mcp_.setListenOnlyMode();

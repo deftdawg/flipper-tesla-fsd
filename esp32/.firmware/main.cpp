@@ -26,6 +26,9 @@
 #include "web_dashboard.h"
 #include "can_dump.h"
 #include "prefs.h"
+#if defined(BOARD_TTGO_DISPLAY)
+#include "display.h"
+#endif
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 static CanDriver *g_can   = nullptr;
@@ -75,6 +78,16 @@ static bool     g_btn_ignore_boot = true;   // wait for release after boot
 static bool     g_factory_reset_window   = false;  // set true on clean boot, clears at 20s
 static bool     g_factory_reset_eligible = false;  // latched at leading edge if press was in window
 static bool     g_factory_reset_armed    = false;  // blink done, waiting for release
+
+#if defined(BOARD_TTGO_DISPLAY)
+static uint32_t g_display_last_wake_ms = 0;
+static bool     g_last_fsd_enabled     = false;
+
+static uint32_t g_btn2_down_ms     = 0;
+static uint32_t g_btn2_release_ms  = 0;
+static bool     g_btn2_down        = false;
+static bool     g_btn2_ignore_boot = true;
+#endif
 
 #if defined(BOARD_LILYGO)
 static uint32_t g_last_can_rx_ms = 0;
@@ -128,6 +141,10 @@ static void button_tick() {
         g_btn_down_ms          = now;
         g_long_fired           = false;
         g_factory_reset_eligible = g_factory_reset_window;  // latch at press time
+#if defined(BOARD_TTGO_DISPLAY)
+        display_wake();
+        g_display_last_wake_ms = now;
+#endif
     }
 
     if (g_btn_down && pressed && !g_long_fired) {
@@ -175,6 +192,30 @@ static void button_tick() {
         dispatch_clicks(g_pending_clicks);
         g_pending_clicks = 0;
     }
+
+#if defined(BOARD_TTGO_DISPLAY)
+    bool pressed2 = (digitalRead(PIN_BUTTON2) == LOW);
+    if (g_btn2_ignore_boot) {
+        if (!pressed2) g_btn2_ignore_boot = false;
+    } else {
+        if (pressed2 && !g_btn2_down) {
+            if ((now - g_btn2_release_ms) >= BUTTON_DEBOUNCE_MS) {
+                g_btn2_down = true;
+                g_btn2_down_ms = now;
+            }
+        }
+        if (!pressed2 && g_btn2_down) {
+            g_btn2_down = false;
+            g_btn2_release_ms = now;
+            if (display_is_awake()) {
+                display_sleep();
+            } else {
+                display_wake();
+                g_display_last_wake_ms = now;
+            }
+        }
+    }
+#endif
 }
 
 // ── LED refresh ───────────────────────────────────────────────────────────────
@@ -434,11 +475,22 @@ void setup() {
     digitalWrite(PIN_CAN_SPEED_MODE, LOW);
 #endif
 
+#if defined(CAN_DRIVER_TWAI)
     Serial.printf("[CFG] pins: LED=%d BUTTON=%d CAN_TX=%d CAN_RX=%d\n",
                   PIN_LED, PIN_BUTTON, PIN_CAN_TX, PIN_CAN_RX);
+#else
+    Serial.printf("[CFG] pins: LED=%d BUTTON=%d MCP_CS=%d MCP_SCK=%d\n",
+                  PIN_LED, PIN_BUTTON, PIN_MCP_CS, PIN_MCP_SCK);
+#endif
 
     pinMode(PIN_BUTTON, INPUT_PULLUP);
+#if defined(BOARD_TTGO_DISPLAY)
+    pinMode(PIN_BUTTON2, INPUT_PULLUP);
+#endif
     led_init();
+#if defined(BOARD_TTGO_DISPLAY)
+    display_init();
+#endif
 
     fsd_state_init(&g_state, TeslaHW_Unknown);
     // Explicit safe defaults — will be overridden after HW auto-detect
@@ -451,6 +503,9 @@ void setup() {
     g_state.bms_output            = false;
 
     prefs_load(&g_state);
+#if defined(BOARD_TTGO_DISPLAY)
+    display_set_enabled(g_state.display_enabled);
+#endif
 
     {
         esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
@@ -483,19 +538,23 @@ void setup() {
     g_can = can_driver_create();
     if (!g_can->begin(true)) {
         Serial.println("[ERR] CAN driver init FAILED — check wiring");
+#if defined(BOARD_TTGO_DISPLAY)
+        Serial.println("[ERR] Continuing in NO-CAN mode for debugging");
         led_set(LED_RED);
-        // Halt: signal error via blinking red indefinitely
+#else
+        // Halt: signal error via blinking red indefinitely.
         while (true) {
             led_set(LED_RED);   delay(200);
             led_set(LED_OFF);   delay(200);
         }
-    }
-
-    if (state_snapshot().op_mode == OpMode_Active) {
-        g_can->setListenOnly(false);
-        Serial.println("[CAN] 500 kbps — Active (restored from NVS)");
+#endif
     } else {
-        Serial.println("[CAN] 500 kbps — Listen-Only");
+        if (state_snapshot().op_mode == OpMode_Active) {
+            g_can->setListenOnly(false);
+            Serial.println("[CAN] 500 kbps — Active (restored from NVS)");
+        } else {
+            Serial.println("[CAN] 500 kbps — Listen-Only");
+        }
     }
     Serial.println("[BTN] Single click : toggle Listen-Only / Active");
     Serial.println("[BTN] Long press 3s: toggle NAG Killer");
@@ -602,6 +661,26 @@ void loop() {
 
     // ── Web dashboard (after CAN to preserve CAN frame latency) ──────────────
     web_dashboard_update();
+
+#if defined(BOARD_TTGO_DISPLAY)
+    s = state_snapshot();
+    display_set_enabled(s.display_enabled);
+    display_set_brightness(s.display_brightness);
+
+    if (s.fsd_enabled && !g_last_fsd_enabled) {
+        display_wake();
+        g_display_last_wake_ms = now;
+    }
+    g_last_fsd_enabled = s.fsd_enabled;
+
+    if (display_is_awake() && s.display_timeout_s > 0) {
+        if (now - g_display_last_wake_ms >= s.display_timeout_s * 1000) {
+            display_sleep();
+        }
+    }
+
+    display_update(&s);
+#endif
 
     update_led();
 }
