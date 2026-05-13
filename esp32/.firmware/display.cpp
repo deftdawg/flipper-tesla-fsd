@@ -120,6 +120,15 @@ void display_update(const FSDState *state) {
                          (state->hw_version == TeslaHW_Legacy) ? "Legacy" : "Detect";
     g_tft.print("HW: "); g_tft.println(hw_str);
 
+    // FPS next to HW row: HW field ends ~x=130, FPS:1500 (8ch*12=96px) fits to x=240.
+    // Use %4u so 4-digit values render in a fixed-width slot without wrapping.
+    static uint32_t last_rx = 0;
+    uint32_t rx_delta = state->rx_count - last_rx;
+    last_rx = state->rx_count;
+    if (rx_delta > 9999) rx_delta = 9999;
+    g_tft.setCursor(144, 35);
+    g_tft.printf("FPS:%4u", rx_delta);
+
     g_tft.setCursor(10, 55);
     g_tft.print("Mode: ");
     if (state->op_mode == OpMode_Active) {
@@ -130,19 +139,33 @@ void display_update(const FSDState *state) {
         g_tft.println("LISTEN ");
     }
 
+    // NAG-killer indicator (right side of Mode row) — Active mode only.
+    //   green  = enabled and currently suppressing nags
+    //   yellow = enabled but no nag seen yet
+    //   grey   = disabled
+    // In Listen-Only we never TX so the indicator would be misleading; blank it.
+    g_tft.setCursor(192, 55);
+    if (state->op_mode == OpMode_Active) {
+        if (state->nag_killer) {
+            g_tft.setTextColor(state->nag_suppressed ? TFT_GREEN : TFT_YELLOW, TFT_NAVY);
+        } else {
+            g_tft.setTextColor(TFT_DARKGREY, TFT_NAVY);
+        }
+        g_tft.print("NAG");
+    } else {
+        // Erase the slot ("NAG" = 3 chars * 12 px = 36 px wide at text size 2)
+        g_tft.fillRect(192, 55, 48, 16, TFT_NAVY);
+    }
+
     g_tft.setTextColor(TFT_WHITE, TFT_NAVY);
     g_tft.setCursor(10, 75);
     g_tft.printf("RX: %-8lu", (unsigned long)state->rx_count);
 
+    // TX = total frames the driver has put on the bus (nag echoes + AP mods + ISA + …),
+    // NOT just patched autopilot frames. frames_modified would read 0 in HW=Legacy /
+    // HW=Unknown deployments where only the nag killer fires.
     g_tft.setCursor(10, 95);
-    g_tft.printf("TX: %-8lu", (unsigned long)state->frames_modified);
-
-    static uint32_t last_rx = 0;
-    uint32_t rx_delta = state->rx_count - last_rx;
-    last_rx = state->rx_count;
-
-    g_tft.setCursor(150, 75);
-    g_tft.printf("FPS:%3u", rx_delta);
+    g_tft.printf("TX: %-8lu", (unsigned long)state->tx_count);
 
     // Uptime bottom right
     uint32_t s = now / 1000;

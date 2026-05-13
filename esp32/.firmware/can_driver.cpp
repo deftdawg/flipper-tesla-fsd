@@ -21,6 +21,7 @@
 class TwaiDriver : public CanDriver {
     bool     listen_only_ = false;
     bool     installed_   = false;
+    uint32_t tx_count_    = 0;
 
     bool install_and_start(bool listen_only) {
         twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(
@@ -64,7 +65,9 @@ public:
         msg.data_length_code = frame.dlc;
         memcpy(msg.data, frame.data, frame.dlc);
         // 5 ms TX timeout — short enough to not stall the main loop
-        return twai_transmit(&msg, pdMS_TO_TICKS(5)) == ESP_OK;
+        if (twai_transmit(&msg, pdMS_TO_TICKS(5)) != ESP_OK) return false;
+        tx_count_++;
+        return true;
     }
 
     bool receive(CanFrame &frame) override {
@@ -80,8 +83,10 @@ public:
     uint32_t errorCount() override {
         twai_status_info_t info;
         if (twai_get_status_info(&info) != ESP_OK) return 0;
-        return info.rx_missed_count + info.bus_error_count;
+        return info.rx_missed_count + info.bus_error_count + info.tx_failed_count;
     }
+
+    uint32_t txCount() override { return tx_count_; }
 
     void setListenOnly(bool enable) override {
         if (listen_only_ == enable) return;
@@ -103,11 +108,14 @@ CanDriver *can_driver_create() {
 class Mcp2515Driver : public CanDriver {
 #if defined(BOARD_TTGO_DISPLAY)
     SPIClass spi_;
+    bool     spi_begun_    = false;
 #endif
     MCP2515  mcp_;
     bool     listen_only_  = false;
     bool     installed_    = false;
+    bool     chip_detected_ = false;
     uint32_t err_count_    = 0;
+    uint32_t tx_count_     = 0;
 
 public:
 #if defined(BOARD_TTGO_DISPLAY)
@@ -119,26 +127,59 @@ public:
     bool begin(bool listen_only) override {
 #if defined(BOARD_TTGO_DISPLAY)
         // Keep MCP2515 on HSPI so TFT_eSPI can own the T-Display LCD SPI bus.
-        spi_.begin(PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI, PIN_MCP_CS);
-        spi_.setFrequency(8000000);
+        if (!spi_begun_) {
+            spi_.begin(PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI, PIN_MCP_CS);
+            spi_.setFrequency(8000000);
+            spi_begun_ = true;
+        }
 #else
-        SPI.begin(PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI, PIN_MCP_CS);
-        SPI.setFrequency(8000000);
+        static bool s_spi_begun = false;
+        if (!s_spi_begun) {
+            SPI.begin(PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI, PIN_MCP_CS);
+            SPI.setFrequency(8000000);
+            s_spi_begun = true;
+        }
 #endif
 
         mcp_.reset();
+
+        // setBitrate() internally enters CONFIG mode and verifies the mode
+        // change via an SPI register read-back. If the MCP2515 isn't wired
+        // up / powered / responding on SPI, this is the call that fails first.
+        // Failure here means SPI/chip presence problem (entering CONFIG mode
+        // does not require any CAN bus traffic).
         if (mcp_.setBitrate(CAN_500KBPS, MCP_CRYSTAL_MHZ) != MCP2515::ERROR_OK) {
-            installed_ = false;
+            chip_detected_ = false;
+            installed_     = false;
+            Serial.printf("[CAN] MCP2515 NOT detected on SPI "
+                          "(CS=%d SCK=%d MISO=%d MOSI=%d) — "
+                          "check wiring, 5V power, and crystal\n",
+                          PIN_MCP_CS, PIN_MCP_SCK, PIN_MCP_MISO, PIN_MCP_MOSI);
             return false;
         }
 
+        // Chip responded over SPI: we know the MCP2515 is physically there.
+        chip_detected_ = true;
+
+        // Switching to listen-only / normal mode is a chip-internal CANCTRL
+        // change — does not require CAN bus traffic either, but if it fails
+        // after a successful setBitrate it is still a chip / SPI issue.
         MCP2515::ERROR err = listen_only
             ? mcp_.setListenOnlyMode()
             : mcp_.setNormalMode();
         listen_only_ = listen_only;
         installed_ = (err == MCP2515::ERROR_OK);
+        if (installed_) {
+            Serial.printf("[CAN] MCP2515 detected on SPI — %s mode @ 500 kbps\n",
+                          listen_only ? "Listen-Only" : "Normal");
+        } else {
+            Serial.printf("[CAN] MCP2515 detected but mode change FAILED (err=%d)\n",
+                          (int)err);
+        }
         return installed_;
     }
+
+    bool hardwarePresent() override { return chip_detected_; }
 
     bool send(const CanFrame &frame) override {
         if (!installed_ || listen_only_) return false;
@@ -150,6 +191,7 @@ public:
             err_count_++;
             return false;
         }
+        tx_count_++;
         return true;
     }
 
@@ -166,6 +208,8 @@ public:
     uint32_t errorCount() override {
         return err_count_;
     }
+
+    uint32_t txCount() override { return tx_count_; }
 
     void setListenOnly(bool enable) override {
         if (!installed_ || listen_only_ == enable) return;

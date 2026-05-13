@@ -34,10 +34,10 @@
   #define PIN_BUTTON         0    // Right button
   #define PIN_BUTTON2        35   // Left button (Display Sleep/Wake)
   // Remap MCP2515 to unused pins to avoid SPI conflict with Display
-  #define PIN_MCP_CS         33
-  #define PIN_MCP_SCK        25
-  #define PIN_MCP_MISO       26
-  #define PIN_MCP_MOSI       32
+  #define PIN_MCP_MOSI       33
+  #define PIN_MCP_MISO       32   // Use a 5v -> 3.3v voltage divider to prevent damage
+  #define PIN_MCP_CS         25
+  #define PIN_MCP_SCK        26
 #else
   #ifndef PIN_CAN_TX
   #define PIN_CAN_TX   22   // TWAI TX → ATOMIC CAN Base TX

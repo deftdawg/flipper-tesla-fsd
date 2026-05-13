@@ -32,6 +32,9 @@
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 static CanDriver *g_can   = nullptr;
+static bool       g_can_ok = false;       // true once g_can->begin() succeeds
+static uint32_t   g_can_last_retry_ms = 0; // for periodic re-init when init fails
+#define CAN_REINIT_INTERVAL_MS  30000u
 static FSDState   g_state = {};
 static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -536,10 +539,13 @@ void setup() {
 #endif
 
     g_can = can_driver_create();
-    if (!g_can->begin(true)) {
+    g_can_ok = g_can->begin(true);
+    g_can_last_retry_ms = millis();
+    if (!g_can_ok) {
         Serial.println("[ERR] CAN driver init FAILED — check wiring");
 #if defined(BOARD_TTGO_DISPLAY)
-        Serial.println("[ERR] Continuing in NO-CAN mode for debugging");
+        Serial.printf("[ERR] Continuing in NO-CAN mode (will retry every %lu ms)\n",
+                      (unsigned long)CAN_REINIT_INTERVAL_MS);
         led_set(LED_RED);
 #else
         // Halt: signal error via blinking red indefinitely.
@@ -589,6 +595,7 @@ void loop() {
     if ((now - last_err_ms) >= 250u) {
         state_enter();
         g_state.crc_err_count = g_can->errorCount();
+        g_state.tx_count      = g_can->txCount();
         state_exit();
         last_err_ms = now;
     }
@@ -631,26 +638,53 @@ void loop() {
             (s.hw_version == TeslaHW_Legacy)  ? "Legacy" : "?";
         Serial.printf(
             "[STA] HW:%-6s FSD:%-4s NAG:%-10s OTA:%-3s "
-            "Profile:%d  RX:%lu TX:%lu Err:%lu\n",
+            "Profile:%d  RX:%lu TX:%lu Mod:%lu Err:%lu\n",
             hw_str,
             s.fsd_enabled     ? "ON"         : "wait",
             s.nag_suppressed  ? "suppressed"  : "active",
             s.tesla_ota_in_progress ? "YES"  : "no",
             s.speed_profile,
             (unsigned long)s.rx_count,
+            (unsigned long)s.tx_count,
             (unsigned long)s.frames_modified,
             (unsigned long)s.crc_err_count);
         last_status_ms = now;
     }
 
-    // ── Wiring sanity warning ─────────────────────────────────────────────────
+    // ── Periodic re-init when CAN driver failed at boot ──────────────────────
+    if (!g_can_ok && g_can &&
+        (now - g_can_last_retry_ms) >= CAN_REINIT_INTERVAL_MS) {
+        g_can_last_retry_ms = now;
+        Serial.println("[CAN] Retrying driver init…");
+        bool listen_only = (state_snapshot().op_mode != OpMode_Active);
+        g_can_ok = g_can->begin(listen_only);
+        if (g_can_ok) {
+            Serial.printf("[CAN] Re-init SUCCESS — %s mode\n",
+                          listen_only ? "Listen-Only" : "Active");
+        }
+    }
+
+    // ── Wiring / hardware sanity warning ─────────────────────────────────────
     static uint32_t last_warn_ms = 0;
     s = state_snapshot();
-    if (s.rx_count == 0 && now > WIRING_WARN_MS &&
-        (now - last_warn_ms) >= 2000u) {
-        Serial.println("[WARN] No CAN traffic after 5 s — check wiring");
-        Serial.println("[WARN] Verify CAN-H on OBD pin 6, CAN-L on pin 14");
-        last_warn_ms = now;
+    if (now > WIRING_WARN_MS && (now - last_warn_ms) >= 5000u) {
+        if (!g_can_ok) {
+            // Driver init failed — distinguish chip-not-detected from other.
+            // Skip the "no CAN traffic" warn entirely (it's never going to
+            // arrive without a working driver).
+            if (g_can && !g_can->hardwarePresent()) {
+                Serial.println("[WARN] MCP2515 not detected on SPI — "
+                               "no CAN traffic possible until chip responds");
+            } else {
+                Serial.println("[WARN] CAN driver not initialised — "
+                               "no CAN traffic possible");
+            }
+            last_warn_ms = now;
+        } else if (s.rx_count == 0) {
+            Serial.println("[WARN] No CAN traffic after 5 s — check wiring");
+            Serial.println("[WARN] Verify CAN-H on OBD pin 6, CAN-L on pin 14");
+            last_warn_ms = now;
+        }
     }
 
     can_dump_tick(now);
