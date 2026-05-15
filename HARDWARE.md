@@ -279,6 +279,8 @@ RX/TX/FPS/NAG status without opening a phone. In its current bare-board
 form there are several wires running between the boards — putting them
 in a 3D-printed case is left as an exercise.
 
+![T-Display Setup D](images/T-Display_MCP2515-CAN.png)
+
 | Component | Price |
 |-----------|-------|
 | [LILYGO TTGO T-Display ESP32 (1.14" ST7789, USB-C)](https://lilygo.cc/products/lilygo%C2%AE-ttgo-t-display-1-14-inch-lcd-esp32-control-board) | ~$10-12 |
